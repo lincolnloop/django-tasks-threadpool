@@ -38,26 +38,32 @@ uv run --group docs zensical build
 
 ## Architecture
 
-The entire implementation is in `tasks_threadpool/backend.py` (~157 lines):
+**`tasks_threadpool/backend.py`** - Django backend interface:
 
 - **ThreadPoolBackend**: Implements Django's `BaseTaskBackend`
-  - Uses `ThreadPoolExecutor` for background execution
+  - Uses `WorkerPool` for background execution
+  - `_execute_task()` handles task lifecycle (READY→RUNNING→SUCCESSFUL/FAILED)
+  - `enqueue()` creates UUID, stores initial result, submits to pool
+  - `get_result()` retrieves result by ID
+- **Context variable**: `current_result_id` allows tasks to access their own result ID
+
+**`tasks_threadpool/pool.py`** - Generic worker pool:
+
+- **WorkerPool**: Priority-aware thread pool with result storage
+  - `PriorityQueue` for task ordering (lower priority number = runs first)
+  - FIFO ordering within same priority level
   - In-memory result store (`_results` dict) with UUID keys
   - LRU eviction via `_completed_ids` deque when exceeding `MAX_RESULTS`
   - Thread-safe with `Lock` protecting shared state
-
-- **Task execution flow**:
-  1. `enqueue()` creates UUID, stores initial READY status, submits to pool, returns current status
-  2. `_execute_task()` runs in worker thread, updates READY→RUNNING→SUCCESSFUL/FAILED
-  3. `get_result()` retrieves result by ID
-
-- **Context variable**: `current_result_id` allows tasks to access their own result ID
+- **get_pool()**: Returns shared pool instance by name (handles Django creating multiple backend instances)
 
 **Backend capabilities:**
+
 - `supports_defer = False` (no scheduled/delayed execution)
 - `supports_async_task = False` (no native async)
 - `supports_get_result = True`
+- `supports_priority = True` (tasks can specify priority -100 to 100)
 
 ## Key Limitation
 
-Results are stored in memory only - lost on restart. ContextVars don't propagate to child threads spawned by tasks.
+Results are stored in memory only - lost on restart.
