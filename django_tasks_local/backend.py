@@ -51,7 +51,9 @@ def _execute_task(func_path: str, args: tuple, kwargs: dict, result_id: str):
     """
     token = current_result_id.set(result_id)
     try:
-        func = import_string(func_path)
+        obj = import_string(func_path)
+        # If it's a Task wrapper, get the underlying function
+        func = getattr(obj, "func", obj)
         return func(*args, **kwargs)
     finally:
         current_result_id.reset(token)

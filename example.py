@@ -2,15 +2,15 @@
 # requires-python = ">=3.12"
 # dependencies = [
 #     "django>=6.0",
-#     "django-tasks-threadpool",
+#     "django-tasks-local",
 #     "nanodjango>=0.13.0",
 # ]
 # ///
 """
 Django 6 Tasks + SSE Demo
 
-Demonstrates the built-in @task decorator with a custom ThreadPoolBackend
-for true background execution, plus Server-Sent Events for progress streaming.
+Demonstrates Django's @task decorator with ThreadPoolBackend for true
+background execution, plus Server-Sent Events for progress streaming.
 """
 
 import json
@@ -20,13 +20,13 @@ from django.core.cache import cache
 from django.http import HttpResponse, JsonResponse, StreamingHttpResponse
 from django.tasks import task
 
-from tasks_threadpool.backend import current_result_id
+from django_tasks_local import current_result_id
 from nanodjango import Django
 
 app = Django(
     TASKS={
         "default": {
-            "BACKEND": "tasks_threadpool.ThreadPoolBackend",
+            "BACKEND": "django_tasks_local.ThreadPoolBackend",
             "OPTIONS": {"MAX_WORKERS": 4},
         }
     },

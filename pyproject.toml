@@ -3,9 +3,9 @@ requires = ["pdm-backend"]
 build-backend = "pdm.backend"
 
 [project]
-name = "django-tasks-threadpool"
+name = "django-tasks-local"
 dynamic = ["version"]
-description = "A thread pool backend for Django 6 tasks"
+description = "Zero-infrastructure task backends for Django 6 (thread pool and process pool)"
 readme = "README.md"
 requires-python = ">=3.12"
 authors = [

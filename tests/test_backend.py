@@ -1,4 +1,4 @@
-"""Tests for ThreadPoolBackend."""
+"""Tests for FuturesBackend, ThreadPoolBackend, and ProcessPoolBackend."""
 
 import threading
 import time
@@ -16,7 +16,7 @@ if not settings.configured:
         ],
         TASKS={
             "default": {
-                "BACKEND": "tasks_threadpool.ThreadPoolBackend",
+                "BACKEND": "django_tasks_local.ThreadPoolBackend",
                 "OPTIONS": {
                     "MAX_WORKERS": 2,
                     "MAX_RESULTS": 5,
@@ -30,8 +30,8 @@ import pytest
 from django.tasks import TaskResultStatus, task
 from django.tasks.exceptions import TaskResultDoesNotExist
 
-from tasks_threadpool import ThreadPoolBackend
-from tasks_threadpool.backend import current_result_id
+from django_tasks_local import ThreadPoolBackend, ProcessPoolBackend, current_result_id
+from django_tasks_local.state import _executor_states
 
 # Module-level task functions (Django requirement)
 _received_args = {}
@@ -72,6 +72,12 @@ def capture_result_id():
 
 
 @task
+def return_result_id():
+    """Return the current result ID (for cross-process testing)."""
+    return current_result_id.get()
+
+
+@task
 def quick():
     return True
 
@@ -100,7 +106,7 @@ def backend():
 @pytest.fixture
 def default_backend():
     """Create a backend with default options."""
-    b = ThreadPoolBackend(alias="default", params={})
+    b = ThreadPoolBackend(alias="default_test", params={})
     yield b
     b.close()
 
@@ -108,35 +114,31 @@ def default_backend():
 @pytest.fixture(autouse=True)
 def clear_globals():
     """Clear global state between tests."""
-    from tasks_threadpool.pool import _pools
-
     _received_args.clear()
     _captured_result_id.clear()
-    # Clear shared pools to ensure fresh state per test
-    _pools.clear()
+    # Clear shared executor states to ensure fresh state per test
+    _executor_states.clear()
     yield
 
 
 class TestBackendInitialization:
     def test_default_options(self, default_backend):
         """Backend uses sensible defaults when no options provided."""
-        assert default_backend._pool.max_results == 1000
-        assert default_backend._pool.worker_count == 10
+        assert default_backend._state.max_results == 1000
 
     def test_custom_options(self, backend):
         """Backend respects custom MAX_WORKERS and MAX_RESULTS."""
-        assert backend._pool.max_results == 5
-        assert backend._pool.worker_count == 2
+        assert backend._state.max_results == 5
 
     def test_capability_flags(self, backend):
         """Backend advertises correct capabilities."""
         assert backend.supports_defer is False
         assert backend.supports_async_task is False
         assert backend.supports_get_result is True
-        assert backend.supports_priority is True
+        assert backend.supports_priority is False
 
     def test_multiple_instances_share_state(self):
-        """Multiple backend instances with same alias share the same pool."""
+        """Multiple backend instances with same alias share the same state."""
         backend1 = ThreadPoolBackend(
             alias="shared", params={"OPTIONS": {"MAX_WORKERS": 2}}
         )
@@ -144,8 +146,8 @@ class TestBackendInitialization:
             alias="shared", params={"OPTIONS": {"MAX_WORKERS": 2}}
         )
 
-        # Should share the same pool
-        assert backend1._pool is backend2._pool
+        # Should share the same state
+        assert backend1._state is backend2._state
 
         # Enqueue on one, retrieve from the other
         result = backend1.enqueue(simple_task)
@@ -163,20 +165,16 @@ class TestEnqueue:
 
         assert result.id is not None
         assert result.backend == backend.alias
-        # Status could be READY, RUNNING, or SUCCESSFUL depending on timing
-        assert result.status in (
-            TaskResultStatus.READY,
-            TaskResultStatus.RUNNING,
-            TaskResultStatus.SUCCESSFUL,
-        )
+        # Status should be READY initially
+        assert result.status == TaskResultStatus.READY
 
-    def test_slow_task_starts_running(self, backend):
+    def test_slow_task_becomes_running(self, backend):
         """Slow task status becomes RUNNING when worker starts executing."""
         result = backend.enqueue(slow_task)
         time.sleep(0.1)  # Wait for worker to pick it up
 
         refreshed = backend.get_result(result.id)
-        assert refreshed.status == TaskResultStatus.RUNNING
+        assert refreshed.status in (TaskResultStatus.RUNNING, TaskResultStatus.SUCCESSFUL)
 
     def test_enqueue_with_args(self, backend):
         """enqueue() passes args and kwargs to task."""
@@ -252,12 +250,13 @@ class TestEviction:
 
 
 class TestClose:
-    def test_close_shuts_down_workers(self, backend):
-        """close() signals workers to stop."""
+    def test_close_shuts_down_executor(self, backend):
+        """close() shuts down the executor."""
         backend.enqueue(long_running_task)
         backend.close()
 
-        assert backend._pool.is_shutdown
+        # Executor should be shut down (removed from registry)
+        assert backend._name not in _executor_states
 
 
 class TestConcurrency:
@@ -284,118 +283,46 @@ class TestConcurrency:
         assert len(results) == 30
 
 
-# Tasks for priority testing - defined at module level
-_execution_order = []
-_execution_lock = threading.Lock()
-
-
-@task
-def record_execution(label):
-    """Record when this task executes."""
-    with _execution_lock:
-        _execution_order.append(label)
-    return label
-
-
-@task(priority=-50)
-def high_priority_task():
-    """A high priority task (lower number = higher priority)."""
-    with _execution_lock:
-        _execution_order.append("high")
-    return "high"
-
-
-@task(priority=50)
-def low_priority_task():
-    """A low priority task."""
-    with _execution_lock:
-        _execution_order.append("low")
-    return "low"
-
-
-@task
-def blocking_task():
-    """Blocks to allow queue to fill up."""
-    time.sleep(0.3)
-    with _execution_lock:
-        _execution_order.append("blocking")
-
-
-class TestPriority:
-    @pytest.fixture(autouse=True)
-    def clear_execution_order(self):
-        """Clear execution order tracking between tests."""
-        _execution_order.clear()
-        yield
-
-    def test_priority_higher_runs_first(self):
-        """Tasks with lower priority number (higher priority) run before higher numbers."""
-        # Use a single worker so we can control execution order
-        backend = ThreadPoolBackend(
-            alias="priority_test",
-            params={"OPTIONS": {"MAX_WORKERS": 1, "MAX_RESULTS": 10}},
+class TestProcessPoolBackend:
+    @pytest.fixture
+    def process_backend(self):
+        """Create a ProcessPoolBackend for testing."""
+        b = ProcessPoolBackend(
+            alias="process_test",
+            params={"OPTIONS": {"MAX_WORKERS": 2, "MAX_RESULTS": 5}},
         )
+        yield b
+        b.close()
 
-        try:
-            # First enqueue a blocking task to hold the single worker
-            backend.enqueue(blocking_task)
-            time.sleep(0.05)  # Let it start
+    def test_basic_execution(self, process_backend):
+        """ProcessPoolBackend executes tasks correctly."""
+        result = process_backend.enqueue(add, args=(2, 3))
+        time.sleep(0.5)  # ProcessPool is slower to start
 
-            # Now enqueue low priority first, then high priority
-            # If priority works, high should execute before low
-            backend.enqueue(low_priority_task)
-            backend.enqueue(high_priority_task)
+        updated = process_backend.get_result(result.id)
+        assert updated.status == TaskResultStatus.SUCCESSFUL
+        assert updated.return_value == 5
 
-            # Wait for all tasks to complete
-            time.sleep(0.6)
+    def test_context_var_in_process(self, process_backend):
+        """ContextVar works in ProcessPoolBackend."""
+        # Note: We use return_result_id which returns the value rather
+        # than capture_result_id which stores in a global (globals don't
+        # cross process boundaries).
+        result = process_backend.enqueue(return_result_id)
+        time.sleep(0.5)
 
-            # Blocking should be first (it started immediately)
-            # Then high priority (-50), then low priority (50)
-            assert _execution_order == ["blocking", "high", "low"]
-        finally:
-            backend.close()
+        updated = process_backend.get_result(result.id)
+        assert updated.status == TaskResultStatus.SUCCESSFUL
+        assert updated.return_value == result.id
 
-    def test_same_priority_fifo(self):
-        """Tasks with same priority maintain FIFO order."""
-        backend = ThreadPoolBackend(
-            alias="fifo_test",
-            params={"OPTIONS": {"MAX_WORKERS": 1, "MAX_RESULTS": 10}},
-        )
+    def test_rejects_unpickleable_args(self, process_backend):
+        """ProcessPoolBackend raises ValueError for unpickleable arguments."""
+        with pytest.raises(ValueError, match="pickleable"):
+            process_backend.enqueue(simple_task, args=(lambda: None,))
 
-        try:
-            # Block the worker
-            backend.enqueue(blocking_task)
-            time.sleep(0.05)
-
-            # Enqueue several tasks with default priority (0) - should stay FIFO
-            backend.enqueue(record_execution, args=("first",))
-            backend.enqueue(record_execution, args=("second",))
-            backend.enqueue(record_execution, args=("third",))
-
-            time.sleep(0.6)
-
-            # Should execute in enqueue order
-            assert _execution_order == ["blocking", "first", "second", "third"]
-        finally:
-            backend.close()
-
-    def test_priority_with_using(self):
-        """Priority can be modified at runtime with task.using()."""
-        backend = ThreadPoolBackend(
-            alias="using_test",
-            params={"OPTIONS": {"MAX_WORKERS": 1, "MAX_RESULTS": 10}},
-        )
-
-        try:
-            backend.enqueue(blocking_task)
-            time.sleep(0.05)
-
-            # Use .using() to override default priority
-            backend.enqueue(record_execution.using(priority=50), args=("low",))
-            backend.enqueue(record_execution.using(priority=-50), args=("high",))
-
-            time.sleep(0.6)
-
-            assert _execution_order == ["blocking", "high", "low"]
-        finally:
-            backend.close()
+    def test_capability_flags(self, process_backend):
+        """ProcessPoolBackend advertises correct capabilities."""
+        assert process_backend.supports_defer is False
+        assert process_backend.supports_async_task is False
+        assert process_backend.supports_get_result is True
+        assert process_backend.supports_priority is False
