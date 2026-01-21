@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-django-tasks-threadpool is a thread pool backend for Django 6's built-in tasks framework. It provides background task execution without external infrastructure (no Redis, Celery, or database required). Tasks run in a `ThreadPoolExecutor`, freeing the request thread immediately.
+django-tasks-local provides zero-infrastructure task backends for Django 6's built-in tasks framework. It offers both `ThreadPoolBackend` (I/O-bound) and `ProcessPoolBackend` (CPU-bound) using Python's standard `concurrent.futures` module.
 
 **Requirements:** Python 3.12+, Django 6.0+
 
@@ -21,7 +21,7 @@ uv run pytest
 uv run pytest tests/test_backend.py::TestEnqueue::test_enqueue_returns_result
 
 # Run tests with coverage
-uv run pytest --cov=tasks_threadpool --cov-report=term-missing
+uv run pytest --cov=django_tasks_local --cov-report=term-missing
 
 # Build package
 uv build
@@ -38,31 +38,38 @@ uv run --group docs zensical build
 
 ## Architecture
 
-**`tasks_threadpool/backend.py`** - Django backend interface:
+**`django_tasks_local/state.py`** - Shared executor state registry:
 
-- **ThreadPoolBackend**: Implements Django's `BaseTaskBackend`
-  - Uses `WorkerPool` for background execution
-  - `_execute_task()` handles task lifecycle (READY→RUNNING→SUCCESSFUL/FAILED)
-  - `enqueue()` creates UUID, stores initial result, submits to pool
-  - `get_result()` retrieves result by ID
-- **Context variable**: `current_result_id` allows tasks to access their own result ID
+- **ExecutorState**: Dataclass holding executor, futures, results, and lock
+- **get_executor_state()**: Returns shared state by name (handles Django creating multiple backend instances)
+- **shutdown_executor()**: Cleanly shuts down a shared executor
 
-**`tasks_threadpool/pool.py`** - Generic worker pool:
+**`django_tasks_local/backend.py`** - Django backend implementations:
 
-- **WorkerPool**: Priority-aware thread pool with result storage
-  - `PriorityQueue` for task ordering (lower priority number = runs first)
-  - FIFO ordering within same priority level
-  - In-memory result store (`_results` dict) with UUID keys
-  - LRU eviction via `_completed_ids` deque when exceeding `MAX_RESULTS`
-  - Thread-safe with `Lock` protecting shared state
-- **get_pool()**: Returns shared pool instance by name (handles Django creating multiple backend instances)
+- **FuturesBackend**: Abstract base class implementing Django's `BaseTaskBackend`
+  - Uses `concurrent.futures` executors for background execution
+  - `enqueue()` creates UUID, stores initial result, submits to executor
+  - `get_result()` retrieves result by ID, checks Future state for RUNNING status
+  - `_on_complete()` callback handles task completion and LRU eviction
+- **ThreadPoolBackend**: Uses `ThreadPoolExecutor` for I/O-bound tasks
+- **ProcessPoolBackend**: Uses `ProcessPoolExecutor` for CPU-bound tasks
+  - Validates pickling of arguments upfront
+- **_execute_task()**: Module-level wrapper that sets ContextVar and invokes the task function
+- **current_result_id**: ContextVar allowing tasks to access their own result ID
 
 **Backend capabilities:**
 
 - `supports_defer = False` (no scheduled/delayed execution)
 - `supports_async_task = False` (no native async)
 - `supports_get_result = True`
-- `supports_priority = True` (tasks can specify priority -100 to 100)
+- `supports_priority = False` (concurrent.futures doesn't support priority)
+
+## Key Design Decisions
+
+1. **Shared state registry**: Multiple backend instances with the same alias share executor and result storage via `ExecutorState`
+2. **Task status from Future**: READY/RUNNING determined by `Future.running()` at `get_result()` time
+3. **ContextVar in both backends**: Works by setting the ContextVar inside the worker thread/process
+4. **Function path resolution**: Tasks are imported by path string for ProcessPool pickling compatibility
 
 ## Key Limitation
 
