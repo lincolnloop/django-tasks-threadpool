@@ -45,6 +45,8 @@ def send_welcome_email(user_id):
 send_welcome_email.enqueue(user.id)
 ```
 
+See [example.py](example.py) for a complete working example.
+
 ## In-Memory Only
 
 Task results live in memory. When your process restarts, pending tasks and results are gone. This is fine for development and use cases where losing a task on deploy is acceptable.

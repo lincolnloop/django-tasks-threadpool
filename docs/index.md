@@ -21,13 +21,7 @@ pip install django-tasks-threadpool
 ```python
 # settings.py
 TASKS = {
-    "default": {
-        "BACKEND": "tasks_threadpool.ThreadPoolBackend",
-        "OPTIONS": {
-            "MAX_WORKERS": 10,
-            "MAX_RESULTS": 1000,
-        }
-    }
+    "default": {"BACKEND": "tasks_threadpool.ThreadPoolBackend"},
 }
 ```
 
