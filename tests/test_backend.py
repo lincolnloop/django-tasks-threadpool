@@ -108,34 +108,35 @@ def default_backend():
 @pytest.fixture(autouse=True)
 def clear_globals():
     """Clear global state between tests."""
-    from tasks_threadpool.backend import _backend_states
+    from tasks_threadpool.pool import _pools
 
     _received_args.clear()
     _captured_result_id.clear()
-    # Clear shared backend state to ensure fresh state per test
-    _backend_states.clear()
+    # Clear shared pools to ensure fresh state per test
+    _pools.clear()
     yield
 
 
 class TestBackendInitialization:
     def test_default_options(self, default_backend):
         """Backend uses sensible defaults when no options provided."""
-        assert default_backend._state.max_results == 1000
-        assert default_backend._state.executor._max_workers == 10
+        assert default_backend._pool.max_results == 1000
+        assert default_backend._pool.worker_count == 10
 
     def test_custom_options(self, backend):
         """Backend respects custom MAX_WORKERS and MAX_RESULTS."""
-        assert backend._state.max_results == 5
-        assert backend._state.executor._max_workers == 2
+        assert backend._pool.max_results == 5
+        assert backend._pool.worker_count == 2
 
     def test_capability_flags(self, backend):
         """Backend advertises correct capabilities."""
         assert backend.supports_defer is False
         assert backend.supports_async_task is False
         assert backend.supports_get_result is True
+        assert backend.supports_priority is True
 
     def test_multiple_instances_share_state(self):
-        """Multiple backend instances with same alias share executor and results."""
+        """Multiple backend instances with same alias share the same pool."""
         backend1 = ThreadPoolBackend(
             alias="shared", params={"OPTIONS": {"MAX_WORKERS": 2}}
         )
@@ -143,9 +144,8 @@ class TestBackendInitialization:
             alias="shared", params={"OPTIONS": {"MAX_WORKERS": 2}}
         )
 
-        # Should share the same state object
-        assert backend1._state is backend2._state
-        assert backend1._state.executor is backend2._state.executor
+        # Should share the same pool
+        assert backend1._pool is backend2._pool
 
         # Enqueue on one, retrieve from the other
         result = backend1.enqueue(simple_task)
@@ -252,12 +252,12 @@ class TestEviction:
 
 
 class TestClose:
-    def test_close_shuts_down_executor(self, backend):
-        """close() shuts down the thread pool."""
+    def test_close_shuts_down_workers(self, backend):
+        """close() signals workers to stop."""
         backend.enqueue(long_running_task)
         backend.close()
 
-        assert backend._state.executor._shutdown
+        assert backend._pool.is_shutdown
 
 
 class TestConcurrency:
@@ -282,3 +282,120 @@ class TestConcurrency:
 
         # All 30 enqueues should succeed (though some may be evicted)
         assert len(results) == 30
+
+
+# Tasks for priority testing - defined at module level
+_execution_order = []
+_execution_lock = threading.Lock()
+
+
+@task
+def record_execution(label):
+    """Record when this task executes."""
+    with _execution_lock:
+        _execution_order.append(label)
+    return label
+
+
+@task(priority=-50)
+def high_priority_task():
+    """A high priority task (lower number = higher priority)."""
+    with _execution_lock:
+        _execution_order.append("high")
+    return "high"
+
+
+@task(priority=50)
+def low_priority_task():
+    """A low priority task."""
+    with _execution_lock:
+        _execution_order.append("low")
+    return "low"
+
+
+@task
+def blocking_task():
+    """Blocks to allow queue to fill up."""
+    time.sleep(0.3)
+    with _execution_lock:
+        _execution_order.append("blocking")
+
+
+class TestPriority:
+    @pytest.fixture(autouse=True)
+    def clear_execution_order(self):
+        """Clear execution order tracking between tests."""
+        _execution_order.clear()
+        yield
+
+    def test_priority_higher_runs_first(self):
+        """Tasks with lower priority number (higher priority) run before higher numbers."""
+        # Use a single worker so we can control execution order
+        backend = ThreadPoolBackend(
+            alias="priority_test",
+            params={"OPTIONS": {"MAX_WORKERS": 1, "MAX_RESULTS": 10}},
+        )
+
+        try:
+            # First enqueue a blocking task to hold the single worker
+            backend.enqueue(blocking_task)
+            time.sleep(0.05)  # Let it start
+
+            # Now enqueue low priority first, then high priority
+            # If priority works, high should execute before low
+            backend.enqueue(low_priority_task)
+            backend.enqueue(high_priority_task)
+
+            # Wait for all tasks to complete
+            time.sleep(0.6)
+
+            # Blocking should be first (it started immediately)
+            # Then high priority (-50), then low priority (50)
+            assert _execution_order == ["blocking", "high", "low"]
+        finally:
+            backend.close()
+
+    def test_same_priority_fifo(self):
+        """Tasks with same priority maintain FIFO order."""
+        backend = ThreadPoolBackend(
+            alias="fifo_test",
+            params={"OPTIONS": {"MAX_WORKERS": 1, "MAX_RESULTS": 10}},
+        )
+
+        try:
+            # Block the worker
+            backend.enqueue(blocking_task)
+            time.sleep(0.05)
+
+            # Enqueue several tasks with default priority (0) - should stay FIFO
+            backend.enqueue(record_execution, args=("first",))
+            backend.enqueue(record_execution, args=("second",))
+            backend.enqueue(record_execution, args=("third",))
+
+            time.sleep(0.6)
+
+            # Should execute in enqueue order
+            assert _execution_order == ["blocking", "first", "second", "third"]
+        finally:
+            backend.close()
+
+    def test_priority_with_using(self):
+        """Priority can be modified at runtime with task.using()."""
+        backend = ThreadPoolBackend(
+            alias="using_test",
+            params={"OPTIONS": {"MAX_WORKERS": 1, "MAX_RESULTS": 10}},
+        )
+
+        try:
+            backend.enqueue(blocking_task)
+            time.sleep(0.05)
+
+            # Use .using() to override default priority
+            backend.enqueue(record_execution.using(priority=50), args=("low",))
+            backend.enqueue(record_execution.using(priority=-50), args=("high",))
+
+            time.sleep(0.6)
+
+            assert _execution_order == ["blocking", "high", "low"]
+        finally:
+            backend.close()
