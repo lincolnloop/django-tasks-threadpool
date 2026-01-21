@@ -220,7 +220,10 @@ class TestEnqueue:
         time.sleep(0.1)  # Wait for worker to pick it up
 
         refreshed = backend.get_result(result.id)
-        assert refreshed.status in (TaskResultStatus.RUNNING, TaskResultStatus.SUCCESSFUL)
+        assert refreshed.status in (
+            TaskResultStatus.RUNNING,
+            TaskResultStatus.SUCCESSFUL,
+        )
 
     def test_enqueue_with_args(self, backend):
         """enqueue() passes args and kwargs to task."""

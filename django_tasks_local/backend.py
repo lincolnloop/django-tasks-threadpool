@@ -226,18 +226,20 @@ class FuturesBackend(BaseTaskBackend):
         # If future still in flight, determine current status
         if future is not None and not future.done():
             status = (
-                TaskResultStatus.RUNNING
-                if future.running()
-                else TaskResultStatus.READY
+                TaskResultStatus.RUNNING if future.running() else TaskResultStatus.READY
             )
             return TaskResult(
                 id=result_id,
                 task=stored_result.task,
                 status=status,
                 enqueued_at=stored_result.enqueued_at,
-                started_at=stored_result.enqueued_at if status == TaskResultStatus.RUNNING else None,
+                started_at=stored_result.enqueued_at
+                if status == TaskResultStatus.RUNNING
+                else None,
                 finished_at=None,
-                last_attempted_at=stored_result.enqueued_at if status == TaskResultStatus.RUNNING else None,
+                last_attempted_at=stored_result.enqueued_at
+                if status == TaskResultStatus.RUNNING
+                else None,
                 args=stored_result.args,
                 kwargs=stored_result.kwargs,
                 backend=self.alias,
