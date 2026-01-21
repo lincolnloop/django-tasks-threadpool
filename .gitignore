@@ -1,0 +1,24 @@
+# Dependencies
+.venv/
+uv.lock
+
+# Build
+dist/
+build/
+*.egg-info/
+
+# Testing
+.coverage
+htmlcov/
+.pytest_cache/
+db.sqlite3
+
+# Tools
+.ruff_cache/
+
+# Python
+__pycache__/
+*.pyc
+
+# Docs
+site/
