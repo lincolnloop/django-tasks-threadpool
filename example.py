@@ -2,6 +2,7 @@
 # requires-python = ">=3.12"
 # dependencies = [
 #     "django>=6.0",
+#     "django-tasks-threadpool",
 #     "nanodjango>=0.13.0",
 # ]
 # ///
