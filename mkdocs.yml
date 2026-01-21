@@ -1,0 +1,9 @@
+site_name: django-tasks-threadpool
+site_url: https://lincolnloop.github.io/django-tasks-threadpool/
+site_description: A thread pool backend for Django 6 tasks
+
+nav:
+  - Home: index.md
+  - Usage: usage.md
+  - API: api.md
+  - Gotchas: gotchas.md
